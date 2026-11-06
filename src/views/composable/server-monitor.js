@@ -13,8 +13,8 @@ import uniqolor from 'uniqolor';
  * @property {number} max - 最大值
  */
 export function getThreshold(data) {
-  // 过滤掉null和0的数据，只对有效延迟值计算统计量
-  const filteredData = data.filter((value) => value !== 0 && value !== null);
+  // 缺测、超时和非有限值不能参与削峰阈值计算。
+  const filteredData = data.filter((value) => Number.isFinite(value) && value > 0);
 
   if (filteredData.length === 0) {
     return {
@@ -26,7 +26,7 @@ export function getThreshold(data) {
   }
 
   // 排序数据
-  const sortedData = [...filteredData].sort((a, b) => Math.ceil(a) - Math.ceil(b));
+  const sortedData = [...filteredData].sort((a, b) => a - b);
   const len = sortedData.length;
 
   // 计算需要裁剪的数量（10%）
@@ -72,6 +72,84 @@ export function getThreshold(data) {
     tolerancePercent,
     min,
     max,
+  };
+}
+
+/**
+ * 使用接口的实际时间戳绘图，避免固定分钟网格丢失非整分钟和降采样数据。
+ * 接口未提供采样间隔，以最常见的间隔（按分钟容忍时间抖动）估算缺测。
+ */
+export function prepareMonitorData(monitor) {
+  const pointMap = new Map();
+  (monitor.created_at || []).forEach((timestamp, index) => {
+    const time = Number(timestamp);
+    if (!Number.isFinite(time) || time <= 0) return;
+    const delay = Number(monitor.avg_delay?.[index]);
+    pointMap.set(time, Number.isFinite(delay) && delay > 0 ? delay : null);
+  });
+  const allPoints = Array.from(pointMap).sort(([a], [b]) => a - b);
+  const intervals = new Map();
+  allPoints.forEach(([time], index) => {
+    if (index === 0) return;
+    const interval = Math.max(1, Math.round((time - allPoints[index - 1][0]) / 60000)) * 60000;
+    intervals.set(interval, (intervals.get(interval) || 0) + 1);
+  });
+  const interval = Array.from(intervals).sort(([a, countA], [b, countB]) => countB - countA || a - b)[0]?.[0]
+    || 60000;
+  return {
+    allPoints,
+    interval,
+  };
+}
+
+export function buildMonitorSeries(monitor, {
+  startTime = 0, endTime, peakShaving = false, prepared,
+} = {}) {
+  const { allPoints, interval } = prepared || prepareMonitorData(monitor);
+  const lastTime = allPoints[allPoints.length - 1]?.[0] || 0;
+  const rangeEnd = endTime ?? lastTime;
+  const points = allPoints.filter(([time]) => time >= startTime && time <= rangeEnd);
+  const { median, tolerancePercent } = peakShaving
+    ? getThreshold(points.map(([, value]) => value)) : {};
+  const data = [];
+  let expectedCount = points.length;
+  let successCount = 0;
+  let shavedCount = 0;
+  let delayTotal = 0;
+  let visibleCount = 0;
+
+  points.forEach(([time, value], index) => {
+    if (index > 0) {
+      const previousTime = points[index - 1][0];
+      if (time - previousTime > interval * 1.5) {
+        data.push([previousTime + interval, null]);
+        expectedCount += Math.max(1, Math.round((time - previousTime) / interval) - 1);
+      }
+    }
+    if (value !== null) {
+      successCount += 1;
+      if (peakShaving && Math.abs(value - median) > median * tolerancePercent) {
+        shavedCount += 1;
+        // 削峰只移除异常值，不伪造缺测；真正的空值仍保留断点。
+        return;
+      }
+      delayTotal += value;
+      visibleCount += 1;
+    }
+    data.push([time, value === null ? null : Number(value.toFixed(2))]);
+  });
+
+  const lastVisibleTime = points[points.length - 1]?.[0];
+  if (lastVisibleTime && rangeEnd - lastVisibleTime > interval * 1.5) {
+    data.push([lastVisibleTime + interval, null], [rangeEnd, null]);
+    expectedCount += Math.floor((rangeEnd - lastVisibleTime) / interval);
+  }
+
+  return {
+    data,
+    avg: visibleCount ? Number((delayTotal / visibleCount).toFixed(2)) : 0,
+    over: expectedCount ? Number(((successCount / expectedCount) * 100).toFixed(2)) : 0,
+    validRate: successCount ? Number(((shavedCount / successCount) * 100).toFixed(2)) : 0,
   };
 }
 

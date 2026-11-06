@@ -30,8 +30,8 @@ class MessageSubscribe {
    */
   once(key, callback) {
     const onceCallback = (...args) => {
-      callback(...args);
       this.off(key, onceCallback);
+      callback(...args);
     };
     this.on(key, onceCallback);
   }
@@ -64,7 +64,7 @@ class MessageSubscribe {
     if (!this.subscribers[key]) {
       return;
     }
-    this.subscribers[key].forEach((callback) => {
+    [...this.subscribers[key]].forEach((callback) => {
       callback(data);
     });
     if (import.meta.env.VITE_LIVE_SUBSCRIBE_DEBUG) {

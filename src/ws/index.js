@@ -50,6 +50,7 @@ const wsService = new WSService({
 });
 
 function restart() {
+  wsService.$wsUrl = getWsApiPath();
   if (wsService.connected !== WS_CONNECTION_STATUS.DISCONNECTED) {
     wsService.close();
   }
@@ -69,14 +70,14 @@ export default (actived) => {
     }
     return;
   }
-  msg.once('connect', () => {
-    if (actived) {
-      actived();
-    }
-  });
+  if (actived) {
+    msg.once('connect', actived);
+  }
   // 如果已经连接中，则不再连接
   if (wsService.connected === WS_CONNECTION_STATUS.CONNECTING) {
     return;
   }
+  // 自动识别后端版本是异步的，连接时再选择对应的地址。
+  wsService.$wsUrl = getWsApiPath();
   wsService.active();
 };

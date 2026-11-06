@@ -11,8 +11,8 @@ const config = reactive({
   init: false,
   nazhua: {
     title: '哪吒监控',
-    // 如果打包禁用 Sarasa Term SC 字体，默认为禁用该字体的配置
-    disableSarasaTermSC: import.meta.env.VITE_DISABLE_SARASA_TERM_SC === '1',
+    // 默认系统字体，设置 false 时才按需加载更纱字体。
+    disableSarasaTermSC: true,
 
     nezhaVersion: ['v0', 'v1'].includes(defaultNezhaVersion) ? defaultNezhaVersion : null,
     apiMonitorPath: '/api/v1/monitor/{id}',

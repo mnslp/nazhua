@@ -90,26 +90,10 @@ export default defineConfig({
     svgLoader(),
   ],
   build: {
+    manifest: true,
     assetsInlineLimit: 8192, // 8KB 以下的资源会被内联
-    rollupOptions: {
-      output: {
-        manualChunks(id) {
-          if (id.includes('node_modules')) {
-            if (id.includes('echarts-gl')) {
-              return 'globe-gl';
-            }
-            return 'vendor';
-          }
-          if (id.includes('src/data/world.geo.json') || id.includes('src/data/country-name-map')) {
-            return 'world-geo';
-          }
-          if (id.includes('.svg')) {
-            return 'svg';
-          }
-          return 'default';
-        },
-      },
-    },
+    // 交给 Rollup 根据动态 import 拆分，避免把业务代码全部强制合并，
+    // 导致详情页和 echarts-gl 被拉入首页依赖及循环分包。
   },
   resolve: {
     alias: (() => {

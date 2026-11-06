@@ -15,6 +15,9 @@ export default (app) => {
   app.component('Popover', Popover);
   app.component('ServerFlag', ServerFlag);
 
-  app.config.globalProperties.$hasSarasaTerm = !import.meta.env.VITE_DISABLE_SARASA_TERM_SC;
+  Object.defineProperty(app.config.globalProperties, '$hasSarasaTerm', {
+    get: () => config.nazhua.disableSarasaTermSC !== true
+      && import.meta.env.VITE_DISABLE_SARASA_TERM_SC !== '1',
+  });
   app.config.globalProperties.$config = config;
 };

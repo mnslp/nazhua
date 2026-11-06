@@ -1,11 +1,7 @@
-name: ESLint Lint for Pull Requests
+name: Validate Pull Requests
 
 on:
   pull_request:
-    paths:
-      - '**/*.js'
-      - '**/*.ts'
-      - '**/*.vue'
 
 jobs:
   lint:
@@ -24,8 +20,17 @@ jobs:
 
       # 安装依赖
       - name: Install dependencies
-        run: npm install
+        run: npm ci
 
       # 运行 ESLint
       - name: Run ESLint
         run: npm run lint
+
+      - name: Run regression tests
+        run: npm test
+
+      - name: Build production bundle
+        run: npm run build
+
+      - name: Check lazy-loaded assets
+        run: npm run check:build

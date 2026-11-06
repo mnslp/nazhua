@@ -46,7 +46,10 @@ jobs:
         echo -e "\n-----------\n哪吒V1请下载dist.zip\n哪吒V0请下载v0-dist.zip\n哪吒V0/nazhua/子目录需求请下载v0-nazhua.zip\nv${{ steps.determine_version.outputs.version }}-all.zip是包含字体的全量包\nv${{ steps.determine_version.outputs.version }}-cdn-jsdelivr.zip是jsdelivr引用版\nv${{ steps.determine_version.outputs.version }}-cdn-loli.zip是cdnjs的loli.net引用版" >> release_notes.md
 
     - name: Install dependencies
-      run: npm install
+      run: npm ci
+
+    - name: Run regression tests
+      run: npm test
 
     - name: Create Release
       id: create_release
@@ -62,6 +65,9 @@ jobs:
     - name: 构建自动版 - 完整引用版本
       run: npm run build
 
+    - name: Check lazy-loaded assets
+      run: npm run check:build
+
     - name: 打包v${{ steps.determine_version.outputs.version }}-all.zip
       run: zip -r v${{ steps.determine_version.outputs.version }}-all.zip dist
 
@@ -71,6 +77,9 @@ jobs:
         VITE_USE_CDN: '1'
         VITE_CDN_LIB_TYPE: 'jsdelivr'
       run: npm run build
+
+    - name: Check lazy-loaded assets
+      run: npm run check:build
 
     - name: 打包v${{ steps.determine_version.outputs.version }}-cdn-jsdelivr.zip
       run: zip -r v${{ steps.determine_version.outputs.version }}-cdn-jsdelivr.zip dist
@@ -82,6 +91,9 @@ jobs:
         VITE_CDN_LIB_TYPE: 'loli'
       run: npm run build
 
+    - name: Check lazy-loaded assets
+      run: npm run check:build
+
     - name: 打包v${{ steps.determine_version.outputs.version }}-cdn-loli.zip
       run: zip -r v${{ steps.determine_version.outputs.version }}-cdn-loli.zip dist
 
@@ -92,6 +104,9 @@ jobs:
         VITE_DISABLE_SARASA_TERM_SC: '1'
       run: npm run build
 
+    - name: Check lazy-loaded assets
+      run: npm run check:build
+
     - name: 打包v0-nazhua.zip
       run: zip -r v0-nazhua.zip dist
 
@@ -101,6 +116,9 @@ jobs:
         VITE_DISABLE_SARASA_TERM_SC: '1'
       run: npm run build
 
+    - name: Check lazy-loaded assets
+      run: npm run check:build
+
     - name: 打包v0-dist.zip
       run: zip -r v0-dist.zip dist
 
@@ -109,6 +127,9 @@ jobs:
         VITE_NEZHA_VERSION: 'v1'
         VITE_DISABLE_SARASA_TERM_SC: '1'
       run: npm run build
+
+    - name: Check lazy-loaded assets
+      run: npm run check:build
 
     - name: 打包dist.zip
       run: zip -r dist.zip dist

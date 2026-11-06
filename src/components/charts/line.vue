@@ -1,6 +1,7 @@
 <template>
   <div
     v-if="option"
+    ref="boxRef"
     class="line-box"
     :style="boxStyle"
   >
@@ -21,6 +22,9 @@ import {
   computed,
   onMounted,
   onUnmounted,
+  onActivated,
+  onDeactivated,
+  nextTick,
 } from 'vue';
 import VChart from 'vue-echarts';
 import lineChart from './line';
@@ -53,6 +57,10 @@ const props = defineProps({
 });
 
 const chartRef = ref();
+const boxRef = ref();
+let resizeObserver = null;
+let resizeFrame = null;
+let active = true;
 const option = computed(() => {
   if (props.dateList && props.valueList) {
     return lineChart({
@@ -74,17 +82,47 @@ const boxStyle = computed(() => {
 });
 
 function handleResize() {
-  chartRef.value?.resize?.();
+  if (!active || resizeFrame !== null) return;
+  resizeFrame = window.requestAnimationFrame(() => {
+    resizeFrame = null;
+    if (boxRef.value?.clientWidth && boxRef.value?.clientHeight) chartRef.value?.resize?.();
+  });
+}
+
+function observeSize() {
+  if (typeof ResizeObserver !== 'undefined' && boxRef.value && !resizeObserver) {
+    resizeObserver = new ResizeObserver(handleResize);
+    resizeObserver.observe(boxRef.value);
+  }
+}
+
+function stopResize() {
+  active = false;
+  resizeObserver?.disconnect();
+  resizeObserver = null;
+  if (resizeFrame !== null) window.cancelAnimationFrame(resizeFrame);
+  resizeFrame = null;
 }
 
 onMounted(() => {
+  observeSize();
   handleResize();
   window.addEventListener('resize', handleResize);
 });
-
+onActivated(() => {
+  active = true;
+  nextTick(() => {
+    if (!active) return;
+    observeSize();
+    handleResize();
+  });
+});
+onDeactivated(stopResize);
 onUnmounted(() => {
+  stopResize();
   window.removeEventListener('resize', handleResize);
 });
+
 </script>
 
 <style lang="scss" scoped>

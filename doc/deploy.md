@@ -214,7 +214,7 @@ window.$$nazhuaConfig = {
   detailServerStatusType: 'progress', // 服务器状态类型--详情页
   simpleColorMode: true, // 服务器状态纯色显示
   serverStatusLinear: true, // 服务器状态渐变线性显示 - 与pureColorMode互斥
-  disableSarasaTermSC: true, // 禁用Sarasa Term SC字体
+  disableSarasaTermSC: true, // 默认使用系统字体，改为 false 可按需启用更纱字体
   hideWorldMap: false, // 隐藏地图
   hideHomeWorldMap: false, // 隐藏首页地图
   hideDetailWorldMap: false, // 隐藏详情地图
@@ -284,3 +284,15 @@ window.$$nazhuaConfig = {
   background-size: cover;
 }
 ```
+
+
+### 历史图表与加载策略
+
+- 资源历史按服务器和接口范围缓存（1d、7d、30d），30 分钟至 24 小时之间切换仅过滤本地日数据。日缓存复用 30 秒，长周期缓存复用 5 分钟；自动刷新和“重试”会重新请求。
+- 加载失败时保留已有数据并显示重试入口；空时间范围会保留时间选择器。
+- HTTP 请求默认超时为 15 秒；WebSocket 重连采用带随机抖动的退避，最大间隔 30 秒。
+- 标签页在后台时，轮询间隔至少为 60 秒（用户配置的更慢间隔保持不变）。
+- 默认使用系统字体，不下载完整更纱字体。设置 `disableSarasaTermSC: false` 后按需加载；`VITE_DISABLE_SARASA_TERM_SC=1` 仍用于构建时排除字体。
+- 地球仪及地图数据按需加载。`npm run check:build` 在构建后检查地球仪没有进入首屏静态依赖。
+
+开发验证：执行 `npm ci`、`npm test`、`npm run lint`、`npm run build` 和 `npm run check:build`。仓库通过 `.gitattributes` 与 `.editorconfig` 统一 LF 换行符。

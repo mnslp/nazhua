@@ -107,9 +107,12 @@ import {
   computed,
   onMounted,
   onUnmounted,
+  onActivated,
+  onDeactivated,
   ref,
 } from 'vue';
 import config from '@/config';
+import { getPollingDelay } from '@/utils/polling';
 import DotDotBox from '@/components/dot-dot-box.vue';
 import {
   getCycleTransferStatusLabel,
@@ -124,6 +127,8 @@ const props = defineProps({
 });
 
 const cycleTransferList = ref([]);
+let viewActive = true;
+let requestSerial = 0;
 
 const refreshInterval = computed(() => {
   let value = parseInt(config.nazhua.detailCycleTransferRefreshTime, 10);
@@ -151,6 +156,9 @@ const cycleTransferViewList = computed(() => cycleTransferList.value.map((item) 
 })));
 
 async function loadCycleTransfer() {
+  if (!viewActive) return;
+  requestSerial += 1;
+  const serial = requestSerial;
   if (config.nazhua.hideDetailCycleTransfer || !props.info?.ID) {
     cycleTransferList.value = [];
     return;
@@ -158,8 +166,10 @@ async function loadCycleTransfer() {
 
   try {
     const list = await loadCycleTransferByServer(props.info);
+    if (!viewActive || serial !== requestSerial) return;
     cycleTransferList.value = Array.isArray(list) ? list : [];
   } catch (error) {
+    if (!viewActive || serial !== requestSerial) return;
     cycleTransferList.value = [];
     console.error('Failed to load cycle transfer data:', error);
   }
@@ -176,13 +186,13 @@ function clearRefreshTimer() {
 
 function setCycleTransferRefreshTimer() {
   clearRefreshTimer();
-  if (refreshInterval.value <= 0 || config.nazhua.hideDetailCycleTransfer) {
+  if (!viewActive || refreshInterval.value <= 0 || config.nazhua.hideDetailCycleTransfer) {
     return;
   }
   refreshTimer = setTimeout(async () => {
     await loadCycleTransfer();
     setCycleTransferRefreshTimer();
-  }, refreshInterval.value * 1000);
+  }, getPollingDelay(refreshInterval.value * 1000));
 }
 
 onMounted(async () => {
@@ -190,9 +200,21 @@ onMounted(async () => {
   setCycleTransferRefreshTimer();
 });
 
-onUnmounted(() => {
+function stopCycleTransfer() {
+  viewActive = false;
+  requestSerial += 1;
   clearRefreshTimer();
+}
+
+onDeactivated(stopCycleTransfer);
+onActivated(async () => {
+  if (!viewActive) {
+    viewActive = true;
+    await loadCycleTransfer();
+    setCycleTransferRefreshTimer();
+  }
 });
+onUnmounted(stopCycleTransfer);
 </script>
 
 <style lang="scss" scoped>

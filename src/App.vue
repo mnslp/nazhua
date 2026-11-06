@@ -22,8 +22,9 @@ import { useRoute } from 'vue-router';
 import config, {
   init as initConfig,
 } from '@/config';
-import sleep from '@/utils/sleep';
 import LayoutMain from './layout/main.vue';
+import { loadSarasaFont } from './load';
+import { getReconnectDelay } from '@/utils/polling';
 
 import { WS_CONNECTION_STATUS } from './ws/service';
 import activeWebsocketService, {
@@ -35,25 +36,16 @@ import activeWebsocketService, {
 const store = useStore();
 const route = useRoute();
 
-const currentTime = ref(0);
+const currentTime = ref(Date.now());
 
 provide('currentTime', currentTime);
 
-/**
- * 刷新当前时间
- * 使用 requestAnimationFrame 持续更新时间，但只在秒级变化时更新值以减少不必要的响应式更新
- */
-let lastUpdateTime = 0;
+// 只需要秒级时钟，无需每帧执行；后台标签页降低唤醒频率。
+let clockTimer = null;
 function refreshTime() {
-  const now = Date.now();
-  // 只在秒级变化时更新，减少响应式更新频率
-  if (Math.floor(now / 1000) !== Math.floor(lastUpdateTime / 1000)) {
-    currentTime.value = now;
-    lastUpdateTime = now;
-  }
-  window.requestAnimationFrame(refreshTime);
+  currentTime.value = Date.now();
+  clockTimer = window.setTimeout(refreshTime, document.hidden ? 60000 : 1000);
 }
-refreshTime();
 
 // 是否为Windows系统
 const isWindows = /windows|win32/i.test(navigator.userAgent);
@@ -64,6 +56,7 @@ if (isWindows) {
 const loadSarasaTermSC = computed(() => config.nazhua.disableSarasaTermSC !== true);
 watch(loadSarasaTermSC, (value) => {
   if (value) {
+    loadSarasaFont().catch((error) => console.warn('字体加载失败，使用系统字体', error));
     document.body.classList.add('sarasa-term-sc');
   } else {
     document.body.classList.remove('sarasa-term-sc');
@@ -75,16 +68,37 @@ watch(loadSarasaTermSC, (value) => {
 /**
  * websocket断连的自动重连
  */
-let stopReconnect = false;
-async function wsReconnect() {
-  if (stopReconnect) {
-    return;
+let reconnectTimer = null;
+let reconnectAttempt = 0;
+let disposed = false;
+function clearReconnectTimer() {
+  if (reconnectTimer !== null) {
+    window.clearTimeout(reconnectTimer);
+    reconnectTimer = null;
   }
-  stopReconnect = true;
-  await sleep(1000);
-  console.log('reconnect ws');
-  activeWebsocketService();
-  stopReconnect = false;
+}
+function wsReconnect() {
+  if (disposed || reconnectTimer !== null) return;
+  const delay = getReconnectDelay(reconnectAttempt);
+  reconnectAttempt += 1;
+  reconnectTimer = window.setTimeout(() => {
+    reconnectTimer = null;
+    if (!disposed) activeWebsocketService();
+  }, delay);
+}
+function handleConnect() {
+  reconnectAttempt = 0;
+  clearReconnectTimer();
+}
+function handleFocus() {
+  if (wsService.connected === WS_CONNECTION_STATUS.CLOSED) {
+    clearReconnectTimer();
+    restart();
+  }
+}
+function handleUnhandledRejection(event) {
+  console.error('未处理的rejection:', event.reason);
+  event.preventDefault();
 }
 
 onMounted(async () => {
@@ -94,6 +108,7 @@ onMounted(async () => {
   if (!config.init) {
     await initConfig();
   }
+  if (disposed) return;
 
   /**
    * 初始化服务器信息
@@ -102,41 +117,28 @@ onMounted(async () => {
     route,
   });
 
-  /**
-   * 初始化WS重连维护
-   */
-  msg.on('close', () => {
-    console.log('ws closed');
-    wsReconnect();
-  });
-  msg.on('error', () => {
-    console.log('ws error');
-    stopReconnect = true;
-  });
-  msg.on('connect', () => {
-    console.log('ws connected');
-    store.dispatch('watchWsMsg');
-  });
-  const handleFocus = () => {
-    // ws在离开焦点后出现断连，尝试重新连接
-    // 仅针对已关闭状态进行重连
-    if (wsService.connected === WS_CONNECTION_STATUS.CLOSED) {
-      restart();
-    }
-  };
+  if (disposed) return;
+
+  // 数据监听仅注册一次，重连时复用，避免每条消息重复更新 store。
+  store.dispatch('watchWsMsg');
+  msg.on('close', wsReconnect);
+  msg.on('error', wsReconnect);
+  msg.on('connect', handleConnect);
   window.addEventListener('focus', handleFocus);
-  /**
-   * 激活websocket服务
-   */
+  window.addEventListener('unhandledrejection', handleUnhandledRejection);
   activeWebsocketService();
-
-  onUnmounted(() => {
-    window.removeEventListener('focus', handleFocus);
-  });
 });
 
-window.addEventListener('unhandledrejection', (event) => {
-  console.error('未处理的rejection:', event.reason);
-  event.preventDefault();
+onUnmounted(() => {
+  disposed = true;
+  clearReconnectTimer();
+  window.clearTimeout(clockTimer);
+  msg.off('close', wsReconnect);
+  msg.off('error', wsReconnect);
+  msg.off('connect', handleConnect);
+  window.removeEventListener('focus', handleFocus);
+  window.removeEventListener('unhandledrejection', handleUnhandledRejection);
+  wsService.close();
 });
+
 </script>

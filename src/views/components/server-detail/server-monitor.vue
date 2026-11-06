@@ -92,7 +92,7 @@
         :class="'monitor-chart-len--' + monitorChartData.cateList.length"
       >
         <div
-          v-for="(cateItem, index) in monitorChartData.cateList"
+          v-for="cateItem in monitorChartData.cateList"
           :key="cateItem.id"
           class="monitor-chart-item"
         >
@@ -132,7 +132,7 @@
           </div>
           <line-chart
             :date-list="monitorChartData.dateList"
-            :value-list="[monitorChartData.valueList[index]]"
+            :value-list="monitorChartData.valueList.filter((item) => item.id === cateItem.id)"
             :size="240"
             :connect-nulls="false"
           />
@@ -196,17 +196,21 @@ import {
   computed,
   onMounted,
   onUnmounted,
+  onActivated,
+  onDeactivated,
 } from 'vue';
 import { useStore } from 'vuex';
 import config from '@/config';
 import request from '@/utils/request';
+import { getPollingDelay } from '@/utils/polling';
 import validate from '@/utils/validate';
 import { isTsdbEnabled, hasTsdb } from '@/utils/tsdb';
 
 import LineChart from '@/components/charts/line.vue';
 
 import {
-  getThreshold,
+  buildMonitorSeries,
+  prepareMonitorData,
   getLineColor,
 } from '@/views/composable/server-monitor';
 
@@ -268,6 +272,7 @@ const peakShaving = ref(localData.peakShaving);
 const refreshData = ref(localData.refreshData);
 const showCates = ref({});
 const monitorData = ref([]);
+const monitorSnapshotTime = ref(0);
 const longPressTimer = ref(null);
 
 const chartType = validate.isSet(localData.chartType)
@@ -282,8 +287,12 @@ const monitorChartType = computed(() => {
 
 // 服务器时间（后面来自接口）
 const nowServerTime = computed(() => store.state.serverTime || Date.now());
-// const nowServerTime = computed(() => Date.now());
-// console.log(store.state.serverTime);
+// 秒级心跳只移动分钟边界，数据加载时保留精确时间，避免每秒重算历史。
+const windowEnd = computed(() => Math.max(Math.floor(nowServerTime.value / 60000) * 60000, monitorSnapshotTime.value));
+const preparedMonitors = computed(() => monitorData.value.map((monitor) => ({
+  monitor,
+  prepared: prepareMonitorData(monitor),
+})));
 const acceptShowTime = computed(() => (Math.floor(nowServerTime.value / 60000) - minute.value) * 60000);
 
 const minuteActiveArrowStyle = computed(() => {
@@ -293,193 +302,56 @@ const minuteActiveArrowStyle = computed(() => {
   };
 });
 
+const monitorSeries = computed(() => preparedMonitors.value.map(({ monitor, prepared }) => ({
+  monitor,
+  series: buildMonitorSeries(monitor, {
+    prepared,
+    startTime: acceptShowTime.value,
+    endTime: minute.value > 1440 ? undefined : windowEnd.value,
+    peakShaving: peakShaving.value,
+  }),
+})));
+
 const monitorChartData = computed(() => {
-  /**
-   * 处理监控数据以生成分类的平均延迟随时间变化的列表。
-   *
-   * @returns {Object} 返回一个对象，包含：
-   * - cateList {Array}: 唯一监控名称的列表。
-   * - dateList {Array}: 排序后的唯一时间戳列表。
-   * - valueList {Array}: 包含以下内容的对象列表：
-   *   - name {String}: 监控名称。
-   *   - data {Array}: [时间戳, 平均延迟] 对的数组。
-   */
   const cateList = [];
-  const cateMap = {};
   const dateSet = new Set();
-  let valueList = [];
-  monitorData.value.forEach((i) => {
-    const dateMap = new Map();
-    const {
-      monitor_name,
-      monitor_id,
-      created_at,
-      avg_delay,
-    } = i;
-    if (!cateMap[monitor_name]) {
-      cateMap[monitor_name] = {
-        id: monitor_id,
-      };
+  const valueList = [];
+  monitorSeries.value.forEach(({ monitor, series }) => {
+    const { monitor_name: name, monitor_id: id } = monitor;
+    if (!series.data.length) return;
+    const color = getLineColor(id);
+    const cateItem = {
+      id,
+      name,
+      color,
+      avg: series.avg,
+      over: series.over,
+      validRate: series.validRate,
+    };
+    const titles = [
+      name,
+      cateItem.avg === 0 ? '' : `平均延迟：${cateItem.avg}ms`,
+      `成功率：${cateItem.over}%`,
+    ];
+    if (peakShaving.value) {
+      titles.push(`削峰率: ${cateItem.validRate}%`);
     }
-    const cateDelayMap = new Map();
-    const cateAcceptTimeMap = new Map();
-    const cateCreateTime = new Set();
-
-    const isPeriodRange = minute.value === 10080 || minute.value === 43200;
-
-    // 实际数据的最早时间戳
-    let earliestTimestamp = nowServerTime.value;
-    created_at.forEach((time, index) => {
-      if (time < earliestTimestamp) {
-        earliestTimestamp = time;
-      }
-      const status = isPeriodRange || time >= acceptShowTime.value;
-
-      // 允许显示的数据，记录到cateAcceptTime
-      if (status) {
-        if (import.meta.env.VITE_MONITOR_DEBUG === '1' && cateAcceptTimeMap.has(time)) {
-          console.log(`${monitor_name} ${time} 重复，值对比： ${avg_delay[index]} vs ${cateAcceptTimeMap.get(time)}`);
-        }
-        cateAcceptTimeMap.set(time, avg_delay[index]);
-      }
-    });
-    if (import.meta.env.VITE_MONITOR_DEBUG === '1') {
-      console.log(`${monitor_name} created_at`, earliestTimestamp);
-      console.log(`${monitor_name} created_at`, JSON.parse(JSON.stringify(created_at)));
-      console.log(`${monitor_name} avg_delay`, JSON.parse(JSON.stringify(avg_delay)));
-    }
-
-    // 允许显示的最早时间戳，用于生成显示时间范围内的数据；7d/30d 仅用数据边界
-    const actualStartTime = isPeriodRange
-      ? earliestTimestamp
-      : Math.max(acceptShowTime.value, earliestTimestamp);
-
-    // 显示时间范围内的分钟数
-    const allMintues = Math.floor((Date.now() - actualStartTime) / 60000);
-
-    // 合成分钟数据
-    for (let j = 0; j < allMintues; j += 1) {
-      const time = actualStartTime + j * 60000;
-      // 记录创建时间
-      cateCreateTime.add(time);
-      // 记录延迟数据
-      const timeProp = cateAcceptTimeMap.get(time);
-      cateDelayMap.set(time, timeProp ?? undefined);
-    }
-
-    // 计算削峰阈值
-    const {
-      median,
-      tolerancePercent,
-    } = peakShaving.value ? getThreshold(Array.from(cateDelayMap.values())) : {};
-
-    // 合成分钟数据
-    cateCreateTime.values().forEach((time) => {
-      const avgDelay = cateDelayMap.get(time) * 1;
-
-      // 只对有效的延迟值进行削峰判断
-      if (peakShaving.value) {
-        // 削峰过滤：根据中位数和动态容差百分比判断异常值
-        const threshold = median * tolerancePercent;
-        // 当偏离中位数超过阈值时，视为异常值
-        if (Math.abs(avgDelay - median) > threshold) {
-          dateMap.set(time, null);
-          return;
-        }
-      }
-      // 无数据或无效数据的情况，设置为undefined
-      if (Number.isNaN(avgDelay)) {
-        dateMap.set(time, undefined);
-      } else {
-        dateMap.set(time, (avgDelay).toFixed(2) * 1);
-      }
-    });
-
-    const lineData = [];
-    const validatedData = [];
-    const overValidatedData = [];
-    let delayTotal = 0;
-    dateMap.forEach((val, key) => {
-      const time = parseInt(key, 10); // 时间戳
-      lineData.push([time, val || null]);
-      if (val) {
-        dateSet.add(time);
-        validatedData.push([time, val]);
-        delayTotal += val;
-      }
-      if (val !== undefined) {
-        overValidatedData.push([time, val]);
-      }
-    });
-
-    if (import.meta.env.VITE_MONITOR_DEBUG === '1') {
-      cateMap[monitor_name].origin = {
-        cateCreateTime,
-        cateDelayMap,
-        cateAcceptTimeMap,
-        dateMap,
-        lineData,
-        validatedData,
-        overValidatedData,
-        delayTotal,
-      };
-    }
-
-    const id = monitor_id;
-    // 计算平均延迟
-    const avgDelay = delayTotal / validatedData.length || 0;
-
-    if (lineData && lineData.length) {
-      if (!validate.hasOwn(showCates.value, id)) {
-        showCates.value[id] = true;
-      }
-      const color = getLineColor(id);
-      // 成功率 = 有效数据点 / 所有数据点
-      const over = overValidatedData.length > 0 ? overValidatedData.length / lineData.length : 0;
-      const validRate = 1 - ((validatedData.length > 0 && overValidatedData.length > 0)
-        ? validatedData.length / overValidatedData.length : 0);
-      const cateItem = {
-        id,
-        name: monitor_name,
-        color,
-        avg: avgDelay.toFixed(2) * 1,
-        over: (over * 100).toFixed(2) * 1,
-        validRate: (validRate * 100).toFixed(2) * 1,
-      };
-      const titles = [
-        cateItem.name,
-        cateItem.avg === 0 ? '' : `平均延迟：${cateItem.avg}ms`,
-        `成功率：${cateItem.over}%`,
-      ];
-      if (peakShaving.value) {
-        titles.push(`削峰率: ${cateItem.validRate}%`);
-      }
-      cateItem.title = titles.filter((s) => s).join('\n');
-      cateList.push(cateItem);
+    cateItem.title = titles.filter((s) => s).join('\n');
+    cateList.push(cateItem);
+    // 分图始终按监控 ID 匹配，避免聚合图隐藏线路后发生索引错位。
+    if (monitorChartType.value === 'single' || showCates.value[id] !== false) {
+      series.data.forEach(([time]) => dateSet.add(time));
       valueList.push({
         id,
-        name: monitor_name,
-        data: lineData,
-        itemStyle: {
-          color,
-        },
-        lineStyle: {
-          color,
-        },
+        name,
+        data: series.data,
+        itemStyle: { color },
+        lineStyle: { color },
       });
     }
   });
-
-  const dateList = Array.from(dateSet).sort((a, b) => a - b);
-  valueList = valueList.filter((i) => showCates.value[i.id]);
-
-  if (import.meta.env.VITE_MONITOR_DEBUG === '1') {
-    window._cateMap = cateMap;
-    console.log(window._cateMap);
-    console.log(dateList, cateList, valueList);
-  }
   return {
-    dateList,
+    dateList: Array.from(dateSet).sort((a, b) => a - b),
     cateList,
     valueList,
   };
@@ -506,7 +378,13 @@ function getTsdbPeriod() {
   return '1d';
 }
 
+let requestSerial = 0;
+let disposed = false;
+let viewActive = true;
+
 async function loadMonitor() {
+  requestSerial += 1;
+  const serial = requestSerial;
   let url;
   if (config.nazhua.nezhaVersion === 'v1') {
     if (hasTsdb(store)) {
@@ -524,7 +402,8 @@ async function loadMonitor() {
   try {
     const res = await request({ url });
     const list = config.nazhua.nezhaVersion === 'v1' ? res?.data?.data : res?.data?.result;
-    if (Array.isArray(list)) {
+    if (!disposed && viewActive && serial === requestSerial && Array.isArray(list)) {
+      monitorSnapshotTime.value = nowServerTime.value;
       monitorData.value = list;
     }
   } catch (err) {
@@ -533,8 +412,9 @@ async function loadMonitor() {
 }
 
 async function toggleMinute(value) {
+  const previousPeriod = getTsdbPeriod();
   minute.value = value;
-  if (value === 10080 || value === 43200) {
+  if (previousPeriod !== getTsdbPeriod()) {
     await loadMonitor();
   }
 }
@@ -543,12 +423,12 @@ function toggleShowCate(id) {
   if (window.innerWidth < 768) {
     return;
   }
-  showCates.value[id] = !showCates.value[id];
+  showCates.value[id] = showCates.value[id] === false;
 }
 
 function handleTouchStart(id) {
   longPressTimer.value = setTimeout(() => {
-    showCates.value[id] = !showCates.value[id];
+    showCates.value[id] = showCates.value[id] === false;
   }, 500);
 }
 
@@ -568,15 +448,17 @@ function handleTouchMove() {
 
 let loadMonitorTimer = null;
 async function setTimeLoadMonitor(force = false) {
+  if (disposed || !viewActive) return;
   if (loadMonitorTimer) {
     clearTimeout(loadMonitorTimer);
   }
   if (refreshData.value || force) {
     await loadMonitor();
   }
+  if (disposed || !viewActive) return;
   let monitorRefreshTime = parseInt(config.nazhua.monitorRefreshTime, 10);
   // 0 为不刷新
-  if (monitorRefreshTime === 0) {
+  if (monitorRefreshTime <= 0) {
     return;
   }
   // 非数字 强制为30
@@ -584,21 +466,38 @@ async function setTimeLoadMonitor(force = false) {
     monitorRefreshTime = 30;
   }
   // 最小 10 秒
-  const sTime = Math.min(monitorRefreshTime, 10);
+  const sTime = Math.max(monitorRefreshTime, 10);
   loadMonitorTimer = setTimeout(() => {
     setTimeLoadMonitor();
-  }, sTime * 1000);
+  }, getPollingDelay(sTime * 1000));
 }
 
 onMounted(() => {
   setTimeLoadMonitor(true);
 });
 
-onUnmounted(() => {
+function stopMonitor() {
+  viewActive = false;
+  requestSerial += 1;
+  handleTouchEnd();
   if (loadMonitorTimer) {
     clearTimeout(loadMonitorTimer);
+    loadMonitorTimer = null;
+  }
+}
+
+onDeactivated(stopMonitor);
+onActivated(() => {
+  if (!viewActive && !disposed) {
+    viewActive = true;
+    setTimeLoadMonitor(true);
   }
 });
+onUnmounted(() => {
+  disposed = true;
+  stopMonitor();
+});
+
 </script>
 
 <style lang="scss" scoped>

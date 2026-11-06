@@ -14,6 +14,9 @@ const requestTagMap = {};
  */
 async function axiosRequest(options) {
   return axios(options).then((res) => res).catch((err) => {
+    if (axios.isCancel(err)) {
+      throw err;
+    }
     if (err.response) {
       return err.response;
     }
@@ -73,6 +76,7 @@ class NetworkRequest {
       defaultContentType = true,
       requestTag = undefined,
       responseType,
+      timeout = 15000,
     } = options || {};
     const {
       abortController,
@@ -103,6 +107,7 @@ class NetworkRequest {
           data,
           signal: abortController?.signal ?? undefined,
           responseType,
+          timeout: Number.isFinite(timeout) && timeout > 0 ? timeout : 15000,
         },
         (res) => {
           resolve(res);
@@ -126,30 +131,35 @@ class NetworkRequest {
    */
   nextTask() {
     if (this.tasking >= limit) {
-      setTimeout(() => {
-        this.nextTask();
-      }, 1000);
       return;
     }
     if (this.tasks.length === 0) {
       return;
     }
-    const [options, success, fail, tag] = this.tasks.pop();
+    const [options, success, fail, tag] = this.tasks.shift();
     // 请求未执行已被中止
     if (options?.signal?.aborted) {
-      this.overTask();
+      fail(new axios.CanceledError('Request canceled before dispatch'));
+      this.nextTask();
       return;
     }
+    this.tasking += 1;
     requestTagMap[tag] = axiosRequest(options);
-    requestTagMap[tag].finally(() => {
+    const finish = () => {
       this.overTask();
       // 一秒内请求不重复
       setTimeout(() => {
         delete requestTagMap[tag];
       }, 1000);
+    };
+    // 同时处理成功和失败，避免忽略 finally 返回的拒绝 Promise。
+    requestTagMap[tag].then((res) => {
+      finish();
+      success(res);
+    }, (err) => {
+      finish();
+      fail(err);
     });
-    requestTagMap[tag].then(success).catch(fail);
-    this.tasking += 1;
   }
 
   /**

@@ -117,6 +117,7 @@ import {
 } from 'vuex';
 
 import config from '@/config';
+import { getPollingDelay } from '@/utils/polling';
 import {
   alias2code,
   locationCode2Info,
@@ -352,7 +353,7 @@ function setListCycleTransferRefreshTimer() {
   listCycleTransferRefreshTimer = setTimeout(async () => {
     await loadListCycleTransfer();
     setListCycleTransferRefreshTimer();
-  }, listCycleTransferRefreshTime.value * 1000);
+  }, getPollingDelay(listCycleTransferRefreshTime.value * 1000));
 }
 
 async function restartListCycleTransferFlow() {

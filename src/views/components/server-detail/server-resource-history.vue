@@ -36,6 +36,20 @@
       </div>
     </div>
 
+    <div
+      v-if="loadError"
+      class="history-status"
+      role="status"
+    >
+      <span>{{ loadError }}</span>
+      <button
+        type="button"
+        :disabled="isLoading"
+        @click="loadMetrics(true, true)"
+      >
+        {{ isLoading ? '重试中…' : '重试' }}
+      </button>
+    </div>
     <div class="history-grid">
       <article
         v-for="card in historyCards"
@@ -92,13 +106,12 @@
             :connect-nulls="false"
             :chart-config="card.chartConfig"
             :mode="chartMode"
-            :size="240"
           />
           <div
             v-else-if="!isLoading"
             class="history-card__empty"
           >
-            暂无历史数据
+            {{ card.loadFailed ? '数据加载失败，请重试' : '所选时间范围暂无历史数据' }}
           </div>
           <div
             v-if="isLoading"
@@ -117,12 +130,16 @@
 import {
   computed,
   onUnmounted,
+  onActivated,
+  onDeactivated,
   ref,
+  shallowRef,
   watch,
 } from 'vue';
 import { useStore } from 'vuex';
 import config from '@/config';
 import request from '@/utils/request';
+import { getPollingDelay } from '@/utils/polling';
 import { hasTsdb, isTsdbEnabled } from '@/utils/tsdb';
 import LineChart from '@/components/charts/line.vue';
 import DotDotBox from '@/components/dot-dot-box.vue';
@@ -218,15 +235,22 @@ const periodActiveArrowStyle = computed(() => {
 });
 const isSupported = computed(() => config.nazhua.nezhaVersion === 'v1' && tsdbEnabled.value);
 const period = ref(readStoredPeriod());
-const metricHistory = ref(createEmptyMetricMap());
+const apiPeriod = computed(() => PERIOD_OPTIONS.find((item) => item.value === period.value)?.apiPeriod || '1d');
+const historyCache = new Map();
+const rawMetricHistory = shallowRef(createEmptyMetricMap());
+const metricHistory = computed(() => Object.fromEntries(METRIC_KEYS.map((key) => [
+  key, rawMetricHistory.value[key].filter((point) => point.ts >= acceptShowTime.value),
+])));
 const isLoading = ref(false);
+const loadError = ref('');
+const failedMetricKeys = ref([]);
 
 let loadMetricsTimer = null;
 let requestSerial = 0;
 let currentAbortController = null;
+let viewActive = true;
 
-const historyCards = computed(() => {
-  const hasSwap = props.info?.Host?.SwapTotal > 0;
+const historySeries = computed(() => {
   const memSwapSeries = buildAlignedSeries([{
     metric: 'memory',
     name: '内存',
@@ -238,11 +262,11 @@ const historyCards = computed(() => {
   }]);
   const netSpeedSeries = buildAlignedSeries([{
     metric: 'net_in_speed',
-    name: '上传',
+    name: '下载',
     color: SERIES_COLORS.net_in_speed,
   }, {
     metric: 'net_out_speed',
-    name: '下载',
+    name: '上传',
     color: SERIES_COLORS.net_out_speed,
   }]);
   const connSeries = buildAlignedSeries([{
@@ -270,6 +294,27 @@ const historyCards = computed(() => {
     color: SERIES_COLORS.process_count,
   }]);
 
+  return {
+    memSwapSeries,
+    netSpeedSeries,
+    connSeries,
+    cpuSeries,
+    diskSeries,
+    processSeries,
+  };
+});
+
+const historyChartConfigs = computed(() => ({
+  percent: getPercentChartConfig(),
+  count: getCountChartConfig(),
+  speed: getSpeedChartConfig(),
+}));
+
+const historyCards = computed(() => {
+  const hasSwap = props.info?.Host?.SwapTotal > 0;
+  const {
+    memSwapSeries, netSpeedSeries, connSeries, cpuSeries, diskSeries, processSeries,
+  } = historySeries.value;
   const currentCpu = firstFinite(props.info?.State?.CPU, latestMetricValue('cpu'));
   const currentMemPercent = firstFinite(
     calcPercent(props.info?.State?.MemUsed, props.info?.Host?.MemTotal),
@@ -311,7 +356,7 @@ const historyCards = computed(() => {
     title: 'CPU',
     summaryValue: formatPercent(currentCpu),
     series: cpuSeries,
-    chartConfig: getPercentChartConfig(),
+    chartConfig: historyChartConfigs.value.percent,
   }), createMetricCard({
     key: 'memory_swap',
     title: '内存 / 交换',
@@ -335,39 +380,39 @@ const historyCards = computed(() => {
       }),
     ],
     series: memSwapSeries,
-    chartConfig: getPercentChartConfig(),
+    chartConfig: historyChartConfigs.value.percent,
   }), createSummaryCard({
     key: 'disk',
     title: '磁盘',
     summaryValue: formatPercent(currentDiskPercent),
     summaryDetail: formatBinaryRatio(props.info?.State?.DiskUsed, props.info?.Host?.DiskTotal),
     series: diskSeries,
-    chartConfig: getPercentChartConfig(),
+    chartConfig: historyChartConfigs.value.percent,
   }), createSummaryCard({
     key: 'process_count',
     title: '进程数',
     summaryValue: formatCount(currentProcessCount),
     series: processSeries,
-    chartConfig: getCountChartConfig(),
+    chartConfig: historyChartConfigs.value.count,
   }), createMetricCard({
     key: 'net_speed',
-    title: '上传 / 下载',
+    title: '下载 / 上传',
     metricRows: [
       createMetricRow({
         key: 'net_in_speed',
-        label: '上传',
+        label: '下载',
         value: formatSpeedText(currentNetInSpeed),
         color: SERIES_COLORS.net_in_speed,
       }),
       createMetricRow({
         key: 'net_out_speed',
-        label: '下载',
+        label: '上传',
         value: formatSpeedText(currentNetOutSpeed),
         color: SERIES_COLORS.net_out_speed,
       }),
     ],
     series: netSpeedSeries,
-    chartConfig: getSpeedChartConfig(),
+    chartConfig: historyChartConfigs.value.speed,
   }), createMetricCard({
     key: 'connections',
     title: 'TCP / UDP',
@@ -386,18 +431,18 @@ const historyCards = computed(() => {
       }),
     ],
     series: connSeries,
-    chartConfig: getCountChartConfig(),
+    chartConfig: historyChartConfigs.value.count,
   })];
 });
 
 const hasRenderableData = computed(() => historyCards.value.some((card) => card.hasData));
-const isModuleVisible = computed(() => isSupported.value && hasRenderableData.value);
+const isModuleVisible = computed(() => isSupported.value);
 
 watch(availablePeriods, (options) => {
   if (options.some((item) => item.value === period.value)) {
     return;
   }
-  period.value = options[0]?.value || '1d';
+  period.value = options[0]?.value || 1440;
 }, {
   immediate: true,
 });
@@ -407,13 +452,14 @@ watch(period, (value) => {
 });
 
 watch(
-  [serverId, period, isSupported],
+  [serverId, apiPeriod, isSupported],
   ([nextServerId, nextPeriod, supported]) => {
     clearLoadTimer();
     abortCurrentLoad();
-    if (!supported || !nextServerId || !nextPeriod) {
+    if (!viewActive || !supported || !nextServerId || !nextPeriod) {
       requestSerial += 1;
-      metricHistory.value = createEmptyMetricMap();
+      rawMetricHistory.value = createEmptyMetricMap();
+      loadError.value = '';
       isLoading.value = false;
       return;
     }
@@ -422,10 +468,21 @@ watch(
   { immediate: true },
 );
 
-onUnmounted(() => {
+function stopMetrics() {
+  viewActive = false;
+  requestSerial += 1;
   clearLoadTimer();
   abortCurrentLoad();
+}
+
+onDeactivated(stopMetrics);
+onActivated(() => {
+  if (!viewActive) {
+    viewActive = true;
+    if (isSupported.value) loadMetrics();
+  }
 });
+onUnmounted(stopMetrics);
 
 function abortCurrentLoad() {
   if (currentAbortController) {
@@ -469,7 +526,7 @@ function clearLoadTimer() {
 
 function scheduleAutoRefresh() {
   clearLoadTimer();
-  if (!isSupported.value || !serverId.value || !period.value || period.value > 1440) {
+  if (!viewActive || !isSupported.value || !serverId.value || !period.value || period.value > 1440) {
     return;
   }
   let refreshSeconds = parseInt(config.nazhua.monitorRefreshTime, 10);
@@ -480,79 +537,83 @@ function scheduleAutoRefresh() {
     return;
   }
   loadMetricsTimer = window.setTimeout(() => {
-    loadMetrics(false);
-  }, Math.max(refreshSeconds, 10) * 1000);
+    loadMetrics(false, true);
+  }, getPollingDelay(Math.max(refreshSeconds, 10) * 1000));
 }
 
-async function loadMetrics(showLoading = true) {
+async function loadMetrics(showLoading = true, force = false) {
+  if (!viewActive || !isSupported.value || !serverId.value) return;
   const currentServerId = serverId.value;
-  if (!currentServerId) {
-    metricHistory.value = createEmptyMetricMap();
-    if (showLoading) {
-      isLoading.value = false;
-    }
+  const requestedPeriod = apiPeriod.value;
+  const cacheKey = `${currentServerId}:${requestedPeriod}`;
+  const cached = historyCache.get(cacheKey);
+  rawMetricHistory.value = cached?.data || createEmptyMetricMap();
+  loadError.value = cached?.error || '';
+  failedMetricKeys.value = cached?.failedKeys || [];
+  const ttl = requestedPeriod === '1d' ? 30000 : 300000;
+  if (!force && cached && !cached.error && Date.now() - cached.updatedAt < ttl) {
+    isLoading.value = false;
+    scheduleAutoRefresh();
     return;
   }
 
-  const serial = requestSerial + 1;
-  requestSerial = serial;
-
+  requestSerial += 1;
+  const serial = requestSerial;
   abortCurrentLoad();
   const abortController = new AbortController();
   currentAbortController = abortController;
-  if (showLoading) {
-    isLoading.value = true;
-  }
+  isLoading.value = showLoading;
 
   try {
-    const periodOption = PERIOD_OPTIONS.find((item) => item.value === period.value);
-    const apiPeriod = periodOption?.apiPeriod || '1d';
-    const metricEntries = await Promise.all(METRIC_KEYS.map(async (metricKey) => {
-      const history = await loadMetricHistory(
-        currentServerId,
-        metricKey,
-        apiPeriod,
-        abortController,
-      );
-      return [metricKey, normalizeMetricHistory(metricKey, history)];
+    const results = await Promise.allSettled(METRIC_KEYS.map(async (key) => {
+      const history = await loadMetricHistory(currentServerId, key, requestedPeriod, abortController);
+      return normalizeMetricHistory(key, history);
     }));
-
-    if (serial !== requestSerial) {
-      return;
-    }
-
-    metricHistory.value = Object.fromEntries(metricEntries);
-  } catch (error) {
-    if (serial === requestSerial) {
-      console.error('Failed to load resource history:', error);
-    }
+    if (serial !== requestSerial) return;
+    const data = { ...(cached?.data || createEmptyMetricMap()) };
+    const failedKeys = [];
+    results.forEach((result, index) => {
+      if (result.status === 'fulfilled') data[METRIC_KEYS[index]] = result.value;
+      else failedKeys.push(METRIC_KEYS[index]);
+    });
+    rawMetricHistory.value = data;
+    failedMetricKeys.value = failedKeys;
+    const failures = failedKeys.length;
+    loadError.value = failures
+      ? `${failures === METRIC_KEYS.length ? '历史数据' : '部分指标'}加载失败${hasRenderableData.value ? '，已保留可用数据' : ''}`
+      : '';
+    historyCache.set(cacheKey, {
+      data,
+      error: loadError.value,
+      failedKeys,
+      updatedAt: Date.now(),
+    });
+    // 每个详情组件最多保留 1d、7d、30d 三个缓存，避免长期浏览累积内存。
+    if (historyCache.size > 3) historyCache.delete(historyCache.keys().next().value);
   } finally {
     if (serial === requestSerial) {
-      if (showLoading) {
-        isLoading.value = false;
-      }
+      isLoading.value = false;
       currentAbortController = null;
       scheduleAutoRefresh();
     }
   }
 }
 
-async function loadMetricHistory(id, metricKey, apiPeriod, abortController) {
+async function loadMetricHistory(id, metricKey, requestedPeriod, abortController) {
   const baseUrl = config.nazhua.v1ApiMetricsPath.replace('{id}', id);
   const query = new URLSearchParams({
     metric: metricKey,
-    period: apiPeriod,
+    period: requestedPeriod,
   }).toString();
   const url = `${baseUrl}${baseUrl.includes('?') ? '&' : '?'}${query}`;
   const res = await request({
     url,
     type: 'GET',
-    controller: {
-      abortController,
-    },
+  }, {
+    abortController,
   });
   if (res?.status !== 200 || !res?.data?.success) {
-    return [];
+    throw new Error('历史数据请求失败');
   }
   const data = res.data?.data || {};
   const dataPoints = data?.data_points || data?.dataPoints || data?.DataPoints;
@@ -560,11 +621,9 @@ async function loadMetricHistory(id, metricKey, apiPeriod, abortController) {
 }
 
 function normalizeMetricHistory(metricKey, history) {
-  const minTs = acceptShowTime.value || 0;
   return history
     .map((item) => normalizeMetricPoint(metricKey, item))
     .filter((item) => item && Number.isFinite(item.ts) && Number.isFinite(item.value))
-    .filter((item) => item.ts >= minTs)
     .sort((a, b) => a.ts - b.ts);
 }
 
@@ -696,6 +755,7 @@ function createSummaryCard({
     summaryDetail,
     metricRows: [],
     ...series,
+    loadFailed: series.valueList.some((item) => failedMetricKeys.value.includes(item.id)),
     chartConfig,
   };
 }
@@ -715,6 +775,7 @@ function createMetricCard({
     summaryDetail: '',
     metricRows,
     ...series,
+    loadFailed: series.valueList.some((item) => failedMetricKeys.value.includes(item.id)),
     chartConfig,
   };
 }
@@ -815,7 +876,9 @@ function formatBinaryParts(bytes, options = {}) {
 function getXAxisConfig() {
   const minutes = period.value || 1440;
   let intervalMinutes = 5;
-  if (minutes > 60 && minutes <= 180) {
+  if (minutes <= 60) {
+    intervalMinutes = 5;
+  } else if (minutes <= 180) {
     intervalMinutes = 15;
   } else if (minutes <= 360) {
     intervalMinutes = 30;
@@ -1021,6 +1084,25 @@ function createEmptyMetricMap() {
     background: #4caf50;
     transition: left 0.3s;
     z-index: 1;
+  }
+}
+
+.history-status {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 12px;
+  color: #e8aa63;
+  font-size: 13px;
+
+  button {
+    padding: 4px 12px;
+    border: 1px solid currentColor;
+    border-radius: 6px;
+    background: transparent;
+    color: inherit;
+    cursor: pointer;
   }
 }
 

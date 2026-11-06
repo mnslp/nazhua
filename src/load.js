@@ -1,11 +1,19 @@
-// 是否禁用 Sarasa Term SC 字体
-if (import.meta.env.VITE_DISABLE_SARASA_TERM_SC !== '1') {
-  if (import.meta.env.VITE_SARASA_TERM_SC_USE_CDN) {
-    import('./assets/fonts/SarasaTermSC/cdn-font.css');
-  } else {
-    import('./assets/fonts/SarasaTermSC/font.css');
+// 默认使用系统字体；显式启用更纱时才下载字体及样式。
+let fontPromise;
+export function loadSarasaFont() {
+  if (import.meta.env.VITE_DISABLE_SARASA_TERM_SC === '1') return Promise.resolve();
+  if (!fontPromise) {
+    fontPromise = Promise.all([
+      import.meta.env.VITE_SARASA_TERM_SC_USE_CDN
+        ? import('./assets/fonts/SarasaTermSC/cdn-font.css')
+        : import('./assets/fonts/SarasaTermSC/font.css'),
+      import('./assets/scss/sarasa-term-sc.scss'),
+    ]).catch((error) => {
+      fontPromise = undefined;
+      throw error;
+    });
   }
-  import('./assets/scss/sarasa-term-sc.scss');
+  return fontPromise;
 }
 
 /**

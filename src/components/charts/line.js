@@ -187,6 +187,8 @@ export default (options) => {
       type: 'time',
       min: xAxisConfig.min,
       max: xAxisConfig.max,
+      minInterval: xAxisConfig.minInterval,
+      maxInterval: xAxisConfig.maxInterval,
       axisLabel: {
         hideOverlap: true,
         nameTextStyle: {

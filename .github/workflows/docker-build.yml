@@ -24,7 +24,10 @@ jobs:
         node-version: '20'
 
     - name: Install dependencies
-      run: npm install
+      run: npm ci
+
+    - name: Run regression tests
+      run: npm test
 
     - name: Determine version
       id: determine_version
@@ -41,6 +44,9 @@ jobs:
     - name: 构建完整引用版本
       run: npm run build
 
+    - name: Check lazy-loaded assets
+      run: npm run check:build
+
     - name: 构建完整引用版本的Docker镜像
       run: |
         docker build -t ghcr.io/${{ github.repository }}:$VERSION .
@@ -51,6 +57,9 @@ jobs:
         VITE_USE_CDN: '1'
         VITE_CDN_LIB_TYPE: 'loli'
       run: npm run build
+
+    - name: Check lazy-loaded assets
+      run: npm run check:build
 
     - name: 构建CDN引用版本的Docker镜像
       run: |
